@@ -50,9 +50,61 @@ def review_contract(spec: dict, ai) -> list[dict]:
          JSON Pointer: split on "/" first, then decode ~1 to "/" inside a key.
          "/paths/~1orders/get" is spec["paths"]["/orders"]["get"].
          It is not "//orders" -- the slash belongs to the key name "/orders".
-    """
     return ai.ask("contract_review", spec)
+    """
+    findings = ai.ask("contract_review", spec)
+    
+    valid_findings = []
+    for finding in findings:
+        path = finding["path"]
+        method = finding["method"].lower()
+        evidence_pointer = finding.get("evidence_pointer", "")
+        
+        # Check 1: Path + method exist
+        if path not in spec.get("paths", {}):
+            continue
+        if method not in spec["paths"][path]:
+            continue
+        
+        # Check 2: Evidence pointer resolves
+        exists, _ = resolve_json_pointer(spec, evidence_pointer)
+        if not exists:
+            continue
+        
+        valid_findings.append(finding)
+    
+    return valid_findings
 
+def resolve_json_pointer(spec: dict, pointer: str) -> tuple[bool, any]:
+    """Resolve a JSON Pointer and return (exists, value).
+    
+    JSON Pointer RFC 6901: "/" separates keys, "~1" decodes to "/", "~0" to "~".
+    Example: "/paths/~1orders/get" → spec["paths"]["/orders"]["get"]
+    """
+    if not pointer.startswith("/"):
+        return False, None
+    
+    parts = pointer[1:].split("/")  # Skip leading "/" and split
+    current = spec
+    
+    for part in parts:
+        # Decode ~1 → /, ~0 → ~ (order matters: ~0 first)
+        part = part.replace("~0", "~").replace("~1", "/")
+        
+        if isinstance(current, dict):
+            if part not in current:
+                return False, None
+            current = current[part]
+        elif isinstance(current, list):
+            try:
+                index = int(part)
+                current = current[index]
+            except (ValueError, IndexError):
+                return False, None
+        else:
+            return False, None
+    
+    return True, current
 
 def design_negative_tests(spec: dict, ai) -> list[dict]:
     """Level 2 -- return runnable test ideas for operations that really exist.
@@ -86,7 +138,32 @@ def design_negative_tests(spec: dict, ai) -> list[dict]:
       3. The case has all required fields: name, method, path, input,
          expected_status.
     """
-    return ai.ask("negative_tests", spec)
+    cases =  ai.ask("negative_tests", spec)
+    valid_cases = []
+    for case in cases:
+        path = case["path"]
+        method = case["method"]
+        expected_status = case["expected_status"]
+            
+        # Check 1: Path + method exist
+        if path not in spec.get("paths", {}):
+            continue
+        if method not in spec["paths"][path]:
+            continue
+
+        # Check 2: expected_status:
+        allowed_negative_statuses = {400, 401, 403, 404, 409, 422}
+        if expected_status not in allowed_negative_statuses:
+            continue
+
+        # Check 3: required fields
+        keys = ["name", "method", "path", "input", "expected_status"]
+        if not all(key in case for key in keys):
+            continue
+
+        valid_cases.append(case)
+
+    return valid_cases
 
 
 def diagnose_incident(logs: str, ai) -> dict:
@@ -118,7 +195,7 @@ def diagnose_incident(logs: str, ai) -> dict:
         if all(evidence in logs for evidence in diagnosis["evidence"]):
             return diagnosis
 
-    return {}   
+    return {} 
 
 
 def review_migration(v1: dict, v2: dict, ai) -> list[dict]:
@@ -161,4 +238,32 @@ def review_migration(v1: dict, v2: dict, ai) -> list[dict]:
       "schema_changed"          -- parameter["schema"] differs between v1 and v2.
                                    If the schemas are identical the claim is false.
     """
-    return ai.ask("migration_review", {"v1": v1, "v2": v2})
+    changes = ai.ask("migration_review", {"v1": v1, "v2": v2})
+
+    valid_changes = []
+    for change in changes:
+        path = change["path"]
+        method = change["method"]
+        change_kind = change["kind"]
+
+        if change_kind == "schema_changed":
+            parameter_name = change["parameter"]
+            parameter_v1 = v1["paths"][path][method]["parameters"]
+            parameter_v2 = v2["paths"][path][method]["parameters"]
+            schema_v1 = {}
+            schema_v2 = {}
+
+            for parameter in parameter_v1:
+                if parameter["name"] == parameter_name:
+                    schema_v1 = parameter["schema"]
+
+            for parameter in parameter_v2:
+                if parameter["name"] == parameter_name:
+                    schema_v2 = parameter["schema"]
+                
+            if schema_v1 == schema_v2:
+                continue
+
+        valid_changes.append(change)
+
+    return valid_changes
